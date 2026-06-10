@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+    min-height: 100dvh;
+  }
+  body {
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* iOS PWA safe-area helpers */
+  .safe-top {
+    padding-top: max(env(safe-area-inset-top), 0px);
+  }
+  .safe-bottom {
+    padding-bottom: max(env(safe-area-inset-bottom), 0px);
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 font-semibold transition active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply btn bg-brand text-white hover:brightness-110;
+  }
+  .btn-ghost {
+    @apply btn bg-bg-elevated text-ink hover:bg-bg-elevated/80;
+  }
+  .btn-danger {
+    @apply btn bg-danger/15 text-danger hover:bg-danger/25;
+  }
+  .card {
+    @apply rounded-2xl bg-bg-surface shadow-soft;
+  }
+  .input {
+    @apply w-full rounded-xl bg-bg-elevated px-4 py-3 text-ink placeholder:text-ink-dim outline-none ring-1 ring-transparent focus:ring-brand;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full bg-bg-elevated px-3 py-1 text-xs text-ink-mute;
+  }
+}
+
+/* hide scrollbar but keep functional */
+.scroll-fade::-webkit-scrollbar {
+  width: 6px;
+}
+.scroll-fade::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 99px;
+}

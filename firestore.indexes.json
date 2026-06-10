@@ -1,0 +1,6 @@
+{
+  "//": "Firestore 인덱스 정의. 배포: firebase deploy --only firestore:indexes",
+  "//messages-note": "rooms/{roomId}/messages 는 단일 컬렉션(collection) 쿼리만 사용하고 정렬은 클라이언트에서 처리하므로 현재 복합 인덱스가 필요 없다. 추후 서버측 orderBy('createdAt') + where 조합 쿼리를 추가하면 아래 indexes 배열에 messages 의 collectionGroup 복합 인덱스(createdAt ASC 등)를 등록하면 된다.",
+  "indexes": [],
+  "fieldOverrides": []
+}

@@ -1,0 +1,186 @@
+rules_version = '2';
+
+// ============================================================================
+// TTS-chat Firestore 보안 규칙
+// ----------------------------------------------------------------------------
+// 지금까지 모든 권한 검사는 클라이언트(src/services/firebaseBackend.ts)에만
+// 존재했기 때문에 SDK를 직접 호출하면 우회가 가능했다. 아래 규칙은 동일한
+// 검사를 서버측(Firestore 보안 규칙)에서 강제한다.
+//
+// 배포 방법:
+//   firebase deploy --only firestore:rules
+//
+// 인덱스까지 함께 배포하려면:
+//   firebase deploy --only firestore:rules,firestore:indexes
+//
+// 데이터 모델 요약:
+//   users/{uid}
+//   friendCodeIndex/{code}
+//   friendRequests/{id}
+//   friendships/{key = 정렬된 두 uid를 ':'로 join}
+//   rooms/{roomId}
+//   rooms/{roomId}/messages/{mid}
+//   rooms/{roomId}/typing/{uid}
+// ============================================================================
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- 공통 헬퍼 ----------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    function isUser(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+    // create/update 시 클라이언트가 보내려는 새 문서 데이터
+    function incoming() {
+      return request.resource.data;
+    }
+    // 변경(update)에서 실제로 바뀐 키 집합
+    function changedKeys() {
+      return incoming().diff(resource.data).affectedKeys();
+    }
+    // 부모 room 문서를 1회 get으로 읽어온다(서브컬렉션 규칙에서 멤버십 확인용).
+    function roomDoc(roomId) {
+      return get(/databases/$(database)/documents/rooms/$(roomId)).data;
+    }
+    function isRoomMember(roomId) {
+      return isSignedIn() && request.auth.uid in roomDoc(roomId).memberIds;
+    }
+
+    // ---- users/{uid} --------------------------------------------------------
+    // read: 인증 사용자라면 누구나(닉네임/아바타 표시용).
+    // create/update/delete: 본인만. 변경 가능한 필드는 화이트리스트로 제한.
+    match /users/{uid} {
+      allow read: if isSignedIn();
+
+      allow create: if isUser(uid)
+        && incoming().id == uid;
+
+      allow update: if isUser(uid)
+        && changedKeys().hasOnly(
+          ['nickname', 'avatarUrl', 'friendCode', 'friendCodeRotatedAt']
+        );
+
+      allow delete: if isUser(uid);
+    }
+
+    // ---- friendCodeIndex/{code} --------------------------------------------
+    // 친구 코드 -> uid 역인덱스. 단건 조회(get)만 허용하고, 전체 덤프(list)는
+    // 금지해 다른 사용자의 코드를 쓸어담지 못하게 한다.
+    match /friendCodeIndex/{code} {
+      allow get: if isSignedIn();
+      allow list: if false;
+
+      // 본인 uid를 가리키는 인덱스만 생성/삭제할 수 있다.
+      allow create: if isSignedIn() && incoming().uid == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+      // 코드 문서는 직접 갱신하지 않고 delete + create로 교체한다.
+      allow update: if false;
+    }
+
+    // ---- friendRequests/{id} ------------------------------------------------
+    // create: 보낸 사람이 본인일 때만.
+    // read: 당사자(from/to)만.
+    // update: 받은 사람만, status/respondedAt 필드만 변경.
+    match /friendRequests/{id} {
+      allow read: if isSignedIn()
+        && (resource.data.fromUserId == request.auth.uid
+            || resource.data.toUserId == request.auth.uid);
+
+      allow create: if isSignedIn()
+        && incoming().fromUserId == request.auth.uid
+        && incoming().toUserId != request.auth.uid
+        && incoming().status == 'pending';
+
+      allow update: if isSignedIn()
+        && resource.data.toUserId == request.auth.uid
+        && changedKeys().hasOnly(['status', 'respondedAt']);
+
+      // 요청은 보관 목적이라 삭제는 막아둔다(필요 시 완화).
+      allow delete: if false;
+    }
+
+    // ---- friendships/{key} --------------------------------------------------
+    // key = 정렬된 두 uid를 ':'로 join.
+    // read/update/delete: 당사자(userIds에 포함된 uid)만.
+    // create: 양 당사자가 모두 userIds에 포함되어야 하며, 생성자는 그중 한 명.
+    match /friendships/{key} {
+      allow read, update, delete: if isSignedIn()
+        && request.auth.uid in resource.data.userIds;
+
+      allow create: if isSignedIn()
+        && incoming().userIds.size() == 2
+        && request.auth.uid in incoming().userIds;
+    }
+
+    // ---- rooms/{roomId} -----------------------------------------------------
+    // read: 멤버만.
+    // create(group): ownerId==본인 && 본인 포함 && 인원 3~8명.
+    // create(dm): 양 멤버 모두 포함(친구 수락 시 양쪽이 만들 수 있음).
+    // update: 멤버만(마지막 메시지 메타 갱신, 그룹 나가기로 인한 멤버 축소 등).
+    // delete: 멤버만(그룹 마지막 인원이 나갈 때).
+    match /rooms/{roomId} {
+      allow read: if isSignedIn()
+        && request.auth.uid in resource.data.memberIds;
+
+      allow create: if isSignedIn()
+        && request.auth.uid in incoming().memberIds
+        && (
+          // 그룹: 소유자 본인 + 3~8명
+          (incoming().type == 'group'
+            && incoming().ownerId == request.auth.uid
+            && incoming().memberIds.size() >= 3
+            && incoming().memberIds.size() <= 8)
+          // DM: 정확히 2명, 양쪽 모두 포함
+          || (incoming().type == 'dm'
+            && incoming().memberIds.size() == 2)
+        );
+
+      // 멤버 목록은 늘릴 수 없고(임의 초대 방지) 축소만 허용한다.
+      allow update: if isSignedIn()
+        && request.auth.uid in resource.data.memberIds
+        && incoming().memberIds.size() <= resource.data.memberIds.size();
+
+      allow delete: if isSignedIn()
+        && request.auth.uid in resource.data.memberIds;
+
+      // ---- rooms/{roomId}/messages/{mid} -----------------------------------
+      // read: 부모 room 멤버.
+      // create: senderId==본인 && 멤버 && text 문자열 && 500자 이하.
+      // update: (본인 메시지 soft delete: deleted/text만)
+      //         또는 (readBy에 본인 uid append)만 허용.
+      // delete: 금지(soft delete만 사용).
+      match /messages/{mid} {
+        allow read: if isRoomMember(roomId);
+
+        allow create: if isRoomMember(roomId)
+          && incoming().senderId == request.auth.uid
+          && incoming().text is string
+          && incoming().text.size() <= 500;
+
+        allow update: if isRoomMember(roomId)
+          && (
+            // (1) 본인 메시지 soft delete: deleted/text 필드만 변경
+            (resource.data.senderId == request.auth.uid
+              && changedKeys().hasOnly(['deleted', 'text']))
+            // (2) 읽음 처리: readBy에 본인 uid append (readBy만 변경)
+            || (changedKeys().hasOnly(['readBy'])
+              && request.auth.uid in incoming().readBy
+              && incoming().readBy.size() == resource.data.readBy.size() + 1
+              && resource.data.readBy.toSet().difference(incoming().readBy.toSet()).size() == 0)
+          );
+
+        allow delete: if false;
+      }
+
+      // ---- rooms/{roomId}/typing/{uid} -------------------------------------
+      // write: 본인(uid)만. read: room 멤버.
+      match /typing/{uid} {
+        allow read: if isRoomMember(roomId);
+        allow write: if isUser(uid) && isRoomMember(roomId);
+      }
+    }
+  }
+}
